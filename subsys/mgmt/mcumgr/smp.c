@@ -1,6 +1,6 @@
 /*
  * Copyright Runtime.io 2018. All rights reserved.
- * Copyright (c) 2021 Nordic Semiconductor ASA
+ * Copyright (c) 2021-2022 Nordic Semiconductor ASA
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -147,13 +147,15 @@ zephyr_smp_transport_init(struct zephyr_smp_transport *zst,
 			  zephyr_smp_transport_out_fn *output_func,
 			  zephyr_smp_transport_get_mtu_fn *get_mtu_func,
 			  zephyr_smp_transport_ud_copy_fn *ud_copy_func,
-			  zephyr_smp_transport_ud_free_fn *ud_free_func)
+			  zephyr_smp_transport_ud_free_fn *ud_free_func,
+			  zephyr_smp_transport_should_be_cleared_fn *should_be_cleared)
 {
 	*zst = (struct zephyr_smp_transport) {
 		.zst_output = output_func,
 		.zst_get_mtu = get_mtu_func,
 		.zst_ud_copy = ud_copy_func,
 		.zst_ud_free = ud_free_func,
+		.zst_should_be_cleared = should_be_cleared,
 	};
 
 #ifdef CONFIG_MCUMGR_SMP_REASSEMBLY
@@ -179,6 +181,38 @@ zephyr_smp_rx_req(struct zephyr_smp_transport *zst, struct net_buf *nb)
 	net_buf_put(&zst->zst_fifo, nb);
 	k_work_submit_to_queue(&smp_work_queue, &zst->zst_work);
 }
+
+void zephyr_smp_rx_clear(struct zephyr_smp_transport *zst, void *arg)
+{
+	struct net_buf *nb;
+	struct k_fifo temp_fifo;
+	bool rerun = false;
+
+	if (k_work_busy_get(&zst->zst_work) & (K_WORK_RUNNING | K_WORK_QUEUED)) {
+		k_work_cancel(&zst->zst_work);
+	}
+
+	k_fifo_init(&temp_fifo);
+
+	while ((nb = net_buf_get(&zst->zst_fifo, K_NO_WAIT)) != NULL) {
+		if (zst->zst_should_be_cleared(nb, arg)) {
+			zephyr_smp_free_buf(nb, zst);
+		} else {
+		        net_buf_put(&temp_fifo, nb);
+		}
+	}
+
+	while (!k_fifo_is_empty(&temp_fifo) &&
+	       (nb = net_buf_get(&zst->zst_fifo, K_NO_WAIT)) != NULL) {
+		net_buf_put(&zst->zst_fifo, nb);
+		rerun = true;
+	}
+
+	if (rerun == true) {
+		k_work_submit_to_queue(&smp_work_queue, &zst->zst_work);
+	}
+}
+
 
 static int zephyr_smp_init(const struct device *dev)
 {

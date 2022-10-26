@@ -1,5 +1,6 @@
 /*
  * Copyright Runtime.io 2018. All rights reserved.
+ * Copyright (c) 2022 Nordic Semiconductor ASA
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -63,7 +64,10 @@ BUILD_ASSERT((CONFIG_MCUMGR_SMP_BT_CONN_PARAM_CONTROL_TIMEOUT * 4U) >
 
 struct smp_bt_user_data {
 	struct bt_conn *conn;
+uint8_t id;
 };
+
+//BUILD_ASSERT(CONFIG_MCUMGR_BUF_USER_DATA_SIZE < sizeof(struct smp_bt_user_data));
 
 enum {
 	CONN_PARAM_SMP_REQUESTED = BIT(0),
@@ -74,12 +78,14 @@ struct conn_param_data {
 	struct k_work_delayable dwork;
 	struct k_work_delayable ework;
 	uint8_t state;
+	struct k_sem smp_notify_sem;
+uint8_t id;
 };
+
+static uint8_t next_id;
 
 static struct zephyr_smp_transport smp_bt_transport;
 static struct conn_param_data conn_data[CONFIG_BT_MAX_CONN];
-
-K_SEM_DEFINE(smp_notify_sem, 0, 1);
 
 /* SMP service.
  * {8D53DC1D-1DB7-4CD3-868B-8A527460AA84}
@@ -92,12 +98,6 @@ static struct bt_uuid_128 smp_bt_svc_uuid = BT_UUID_INIT_128(
  */
 static struct bt_uuid_128 smp_bt_chr_uuid = BT_UUID_INIT_128(
 	BT_UUID_128_ENCODE(0xda2e7828, 0xfbce, 0x4e01, 0xae9e, 0x261174997c48));
-
-/* SMP Bluetooth notification sent callback */
-static void smp_notify_finished(struct bt_conn *conn, void *user_data)
-{
-	k_sem_give(&smp_notify_sem);
-}
 
 /* Helper function that allocates conn_param_data for a conn. */
 static struct conn_param_data *conn_param_data_alloc(struct bt_conn *conn)
@@ -128,6 +128,14 @@ static struct conn_param_data *conn_param_data_get(const struct bt_conn *conn)
 	return NULL;
 }
 
+/* SMP Bluetooth notification sent callback */
+static void smp_notify_finished(struct bt_conn *conn, void *user_data)
+{
+LOG_ERR("given");
+	struct conn_param_data *dat = conn_param_data_get(conn);
+	k_sem_give(&dat->smp_notify_sem);
+}
+
 /* Sets connection parameters for a given conn. */
 static void conn_param_set(struct bt_conn *conn, struct bt_le_conn_param *param)
 {
@@ -142,7 +150,6 @@ static void conn_param_set(struct bt_conn *conn, struct bt_le_conn_param *param)
 		(void)k_work_cancel_delayable(&cpd->ework);
 	}
 }
-
 
 /* Work handler function for restoring the preferred connection parameters for the connection. */
 static void conn_param_on_pref_restore(struct k_work *work)
@@ -211,6 +218,7 @@ static ssize_t smp_bt_chr_write(struct bt_conn *conn,
 			(struct smp_bt_user_data *)zephyr_smp_reassembly_get_ud(&smp_bt_transport);
 
 		if (ud != NULL) {
+//todo
 			bt_conn_unref(ud->conn);
 			ud->conn = NULL;
 		}
@@ -230,6 +238,7 @@ static ssize_t smp_bt_chr_write(struct bt_conn *conn,
 			conn_param_smp_enable(conn);
 		}
 
+//TODO
 		ud->conn = bt_conn_ref(conn);
 	}
 
@@ -260,7 +269,11 @@ static ssize_t smp_bt_chr_write(struct bt_conn *conn,
 	net_buf_add_mem(nb, buf, len);
 
 	ud = net_buf_user_data(nb);
-	ud->conn = bt_conn_ref(conn);
+//	ud->conn = bt_conn_ref(conn);
+	ud->conn = conn;
+
+struct conn_param_data *cpd = conn_param_data_get(conn);
+ud->id = cpd->id;
 
 	if (IS_ENABLED(CONFIG_MCUMGR_SMP_BT_CONN_PARAM_CONTROL)) {
 		conn_param_smp_enable(conn);
@@ -278,6 +291,7 @@ static void smp_bt_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
 	if (zephyr_smp_reassembly_expected(&smp_bt_transport) >= 0 && value == 0) {
 		struct smp_bt_user_data *ud = zephyr_smp_reassembly_get_ud(&smp_bt_transport);
 
+//todo
 		bt_conn_unref(ud->conn);
 		ud->conn = NULL;
 
@@ -355,7 +369,7 @@ static void smp_bt_ud_free(void *ud)
 	struct smp_bt_user_data *user_data = ud;
 
 	if (user_data->conn) {
-		bt_conn_unref(user_data->conn);
+//		bt_conn_unref(user_data->conn);
 		user_data->conn = NULL;
 	}
 }
@@ -366,7 +380,9 @@ static int smp_bt_ud_copy(struct net_buf *dst, const struct net_buf *src)
 	struct smp_bt_user_data *dst_ud = net_buf_user_data(dst);
 
 	if (src_ud->conn) {
-		dst_ud->conn = bt_conn_ref(src_ud->conn);
+//		dst_ud->conn = bt_conn_ref(src_ud->conn);
+		dst_ud->conn = src_ud->conn;
+dst_ud->id = src_ud->id;
 	}
 
 	return 0;
@@ -386,11 +402,15 @@ static int smp_bt_tx_pkt(struct net_buf *nb)
 		.func = smp_notify_finished,
 		.data = nb->data,
 	};
+	bool last = false;
 	bool sent = false;
 	struct bt_conn_info info;
+	struct conn_param_data *cpd;
 
+LOG_ERR("tx");
 	conn = smp_bt_conn_from_pkt(nb);
 	if (conn == NULL) {
+LOG_ERR("no1");
 		rc = MGMT_ERR_ENOENT;
 		goto cleanup;
 	}
@@ -407,6 +427,8 @@ static int smp_bt_tx_pkt(struct net_buf *nb)
 	if (rc != 0 || info.state != BT_CONN_STATE_CONNECTED) {
 		/* Remote device has disconnected */
 		bt_conn_unref(conn);
+
+LOG_ERR("no2");
 		rc = MGMT_ERR_ENOENT;
 		goto cleanup;
 	}
@@ -420,19 +442,43 @@ static int smp_bt_tx_pkt(struct net_buf *nb)
 		goto cleanup;
 	}
 
-	k_sem_reset(&smp_notify_sem);
+	cpd = conn_param_data_get(conn);
+	struct smp_bt_user_data *src_ud = net_buf_user_data(nb);
+
+if (cpd->id == 0 || cpd->id != src_ud->id) {
+/* The device that sent this packet has disconnected and is not the same active connection, drop the outgoing data */
+		bt_conn_unref(conn);
+
+LOG_ERR("no4");
+		rc = MGMT_ERR_ENOENT;
+		goto cleanup;
+}
+
+	k_sem_reset(&cpd->smp_notify_sem);
 
 	while (off < nb->len) {
-		if ((off + mtu_size) > nb->len) {
+LOG_ERR("loop");
+		if ((off + mtu_size) >= nb->len) {
 			/* Final packet, limit size */
 			mtu_size = nb->len - off;
+			last = true;
 		}
 
 		notify_param.len = mtu_size;
 
-		rc = bt_gatt_notify_cb(conn, &notify_param);
+		/* Use a synchronous write for the final packet to prevent issues with clients
+		 * that disconnect instantly, whereby the zephyr kernel does not return to this
+		 * function until after the disconnect callback has finished processing, which
+		 * can cause advertising failures.
+		 */
+		if (last == false) {
+			rc = bt_gatt_notify_cb(conn, &notify_param);
+		} else {
+			rc = bt_gatt_notify(conn, notify_param.attr, notify_param.data, mtu_size);
+		}
 
 		if (rc == -ENOMEM) {
+last = false;
 			if (sent == false) {
 				/* Failed to send a packet thus far, try reducing the MTU size
 				 * as perhaps the buffer size is limited to a value which is
@@ -460,7 +506,13 @@ static int smp_bt_tx_pkt(struct net_buf *nb)
 			notify_param.data = &nb->data[off];
 			sent = true;
 
-			k_sem_take(&smp_notify_sem, K_FOREVER);
+LOG_ERR("take");
+			if (last == false) {
+				/* Wait for the completion (or disconnect) semaphore before
+				 * continuing, allowing other parts of the system to run.
+				 */
+				k_sem_take(&cpd->smp_notify_sem, K_FOREVER);
+			}
 		} else {
 			/* No connection, cannot continue */
 			rc = MGMT_ERR_EUNKNOWN;
@@ -469,6 +521,7 @@ static int smp_bt_tx_pkt(struct net_buf *nb)
 	}
 
 cleanup:
+LOG_ERR("end?");
 	if (rc != MGMT_ERR_ENOENT) {
 		bt_conn_unref(conn);
 	}
@@ -493,26 +546,118 @@ int smp_bt_unregister(void)
 static void connected(struct bt_conn *conn, uint8_t err)
 {
 	if (err == 0) {
-		conn_param_data_alloc(conn);
+		struct conn_param_data *cpd = conn_param_data_alloc(conn);
+		k_sem_reset(&cpd->smp_notify_sem);
+cpd->id = next_id++;
+if (next_id == 0) {
+++next_id;
+}
+//TODO: also check that no others are using this index
 	}
 }
 
 /* BT disconnected callback. */
+extern void zephyr_smp_rx_clear(struct zephyr_smp_transport *zst, void *arg);
+
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
 	struct conn_param_data *cpd = conn_param_data_get(conn);
 
-	/* Cancel work if ongoing. */
-	(void)k_work_cancel_delayable(&cpd->dwork);
-	(void)k_work_cancel_delayable(&cpd->ework);
+LOG_ERR("dc/given");
+	/* Clear all pending requests from this device which have yet to be processed from the
+	 * FIFO.
+	 */
+	zephyr_smp_rx_clear(&smp_bt_transport, (void *)conn);
+
+	/* Force giving the notification semaphore here, this is only needed if there is a pending
+	 * outgoing packet when the device has disconnected, as in this case the notification
+	 * callback will not be called and this is needed to prevent a deadlock.
+	 */
+	k_sem_give(&cpd->smp_notify_sem);
+
+	if (IS_ENABLED(CONFIG_MCUMGR_SMP_BT_CONN_PARAM_CONTROL)) {
+		/* Cancel work if ongoing. */
+		(void)k_work_cancel_delayable(&cpd->dwork);
+		(void)k_work_cancel_delayable(&cpd->ework);
+	}
 
 	/* Clear cpd. */
+cpd->id = 0;
 	cpd->state = 0;
 	cpd->conn = NULL;
 }
 
 static void conn_param_control_init(void)
 {
+	for (size_t i = 0; i < ARRAY_SIZE(conn_data); i++) {
+		k_work_init_delayable(&conn_data[i].dwork, conn_param_on_pref_restore);
+		k_work_init_delayable(&conn_data[i].ework, conn_param_on_error_retry);
+	}
+}
+
+//TODO: remove
+/*
+bool bt_do_check(struct net_buf *nb)
+{
+        struct bt_conn *conn;
+int rc;
+	struct bt_conn_info info;
+
+        conn = smp_bt_conn_from_pkt(nb);
+        if (conn == NULL) {
+return false;
+        }
+
+        rc = bt_conn_get_info(conn, &info);
+        bt_conn_unref(conn);
+        struct conn_param_data *cpd = conn_param_data_get(conn);
+if (cpd != NULL) {
+--cpd->refs;
+LOG_ERR("-REF (%d)", cpd->refs);
+}
+
+LOG_ERR("rc = %d, state = %d, id = %d, conn = %p", rc, info.state, info.id, (void *)conn);
+
+	if (rc != 0 || info.state != BT_CONN_STATE_CONNECTED) {
+return false;
+	}
+
+return true;
+}
+*/
+
+static bool smp_bt_should_be_cleared(struct net_buf *nb, void *arg)
+{
+	const struct bt_conn *conn = (struct bt_conn *)arg;
+	struct smp_bt_user_data *src_ud = net_buf_user_data(nb);
+
+	if (conn == NULL) {
+LOG_ERR("conn = null");
+		return true;
+	}
+
+	if (src_ud == NULL) {
+LOG_ERR("src_ud = null");
+		return true;
+	}
+
+struct conn_param_data *cpd = conn_param_data_get(conn);
+
+	if (src_ud->conn == conn && (cpd->id == 0 || cpd->id != src_ud->id)) {
+LOG_ERR("matches");
+		return true;
+	}
+
+LOG_ERR("different");
+	return false;
+}
+
+static int smp_bt_init(const struct device *dev)
+{
+	ARG_UNUSED(dev);
+
+next_id = 1;
+LOG_ERR("Registered");
 	/* Register BT callbacks */
 	static struct bt_conn_cb conn_callbacks = {
 		.connected = connected,
@@ -520,23 +665,19 @@ static void conn_param_control_init(void)
 	};
 	bt_conn_cb_register(&conn_callbacks);
 
-	for (size_t i = 0; i < ARRAY_SIZE(conn_data); i++) {
-		k_work_init_delayable(&conn_data[i].dwork, conn_param_on_pref_restore);
-		k_work_init_delayable(&conn_data[i].ework, conn_param_on_error_retry);
-	}
-}
-
-static int smp_bt_init(const struct device *dev)
-{
-	ARG_UNUSED(dev);
-
 	if (IS_ENABLED(CONFIG_MCUMGR_SMP_BT_CONN_PARAM_CONTROL)) {
 		conn_param_control_init();
 	}
 
+	uint8_t i = 0;
+	while (i < CONFIG_BT_MAX_CONN) {
+		k_sem_init(&conn_data[i].smp_notify_sem, 0, 1);
+		++i;
+	}
+
 	zephyr_smp_transport_init(&smp_bt_transport, smp_bt_tx_pkt,
 				  smp_bt_get_mtu, smp_bt_ud_copy,
-				  smp_bt_ud_free);
+				  smp_bt_ud_free, smp_bt_should_be_cleared);
 	return 0;
 }
 

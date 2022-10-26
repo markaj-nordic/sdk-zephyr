@@ -1,5 +1,6 @@
 /*
  * Copyright Runtime.io 2018. All rights reserved.
+ * Copyright (c) 2022 Nordic Semiconductor ASA
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -69,6 +70,9 @@ typedef int zephyr_smp_transport_ud_copy_fn(struct net_buf *dst,
  */
 typedef void zephyr_smp_transport_ud_free_fn(void *ud);
 
+//TODO: description
+typedef bool zephyr_smp_transport_should_be_cleared_fn(struct net_buf *nb, void *arg);
+
 /**
  * @brief Provides Zephyr-specific functionality for sending SMP responses.
  */
@@ -83,6 +87,7 @@ struct zephyr_smp_transport {
 	zephyr_smp_transport_get_mtu_fn *zst_get_mtu;
 	zephyr_smp_transport_ud_copy_fn *zst_ud_copy;
 	zephyr_smp_transport_ud_free_fn *zst_ud_free;
+	zephyr_smp_transport_should_be_cleared_fn *zst_should_be_cleared;
 
 #ifdef CONFIG_MCUMGR_SMP_REASSEMBLY
 	/* Packet reassembly internal data, API access only */
@@ -106,7 +111,8 @@ void zephyr_smp_transport_init(struct zephyr_smp_transport *zst,
 			       zephyr_smp_transport_out_fn *output_func,
 			       zephyr_smp_transport_get_mtu_fn *get_mtu_func,
 			       zephyr_smp_transport_ud_copy_fn *ud_copy_func,
-			       zephyr_smp_transport_ud_free_fn *ud_free_func);
+			       zephyr_smp_transport_ud_free_fn *ud_free_func,
+			       zephyr_smp_transport_should_be_cleared_fn *should_be_cleared);
 
 #ifdef __cplusplus
 }
